@@ -29,6 +29,7 @@ async function main() {
   const setPaused = (on: boolean) => {
     if (State.paused === on) return;
     State.paused = on;
+    if (on && State.pendingApproval) void Bridge.approvalDecline(State.pendingApproval.requestId);
     void Bridge.setPaused(on);
   };
 
