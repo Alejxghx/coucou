@@ -65,7 +65,7 @@ pub fn config_path(
         (HookAgent::Codex, Some(path)) => path,
         _ => {
             let home = user_profile.filter(|path| path.is_absolute())
-                .ok_or("USERPROFILE must name an absolute user directory; Coucou won't guess a hook configuration location")?;
+                .ok_or("The user home must name an absolute directory; Coucou won't guess a hook configuration location")?;
             home.join(if agent == HookAgent::Codex { ".codex" } else { ".claude" })
         }
     };
@@ -119,17 +119,20 @@ impl HookConfig {
         if !self.hook_path.is_absolute() {
             return Err("The hook relay must use an absolute path; check LOCALAPPDATA".into());
         }
+        #[cfg(windows)]
         let executable = self.hook_path.to_str().ok_or("The hook relay path isn't valid Unicode")?;
         // Both agents pass this through a shell. Quotes protect spaces and '&'
         // but not cmd.exe %variables% / delayed !variables!, or Bash $() and
         // backticks. Refuse these uncommon installation paths instead of
         // guessing at cross-shell escaping or executing a different command.
+        #[cfg(windows)]
         let unsafe_path = executable.chars().any(|ch| {
             matches!(ch, '"' | '\r' | '\n' | '\0') || match self.agent {
                 HookAgent::Codex => matches!(ch, '%' | '!'),
                 HookAgent::Claude => matches!(ch, '$' | '`'),
             }
         });
+        #[cfg(windows)]
         if unsafe_path {
             return Err("The hook relay path contains shell expansion characters. Move Coucou to a path without them before installing hooks".into());
         }
@@ -146,10 +149,14 @@ impl HookConfig {
     }
 
     fn command(&self, event: &str) -> String {
-        let exe = self.hook_path.to_string_lossy().replace('\\', "/");
+        let path = self.hook_path.to_string_lossy();
+        #[cfg(windows)]
+        let exe = format!("\"{}\"", path.replace('\\', "/"));
+        #[cfg(unix)]
+        let exe = format!("'{}'", path.replace('\'', "'\\''"));
         match self.agent {
-            HookAgent::Claude => format!("\"{exe}\" {event}"),
-            HookAgent::Codex => format!("\"{exe}\" --agent codex {event}"),
+            HookAgent::Claude => format!("{exe} {event}"),
+            HookAgent::Codex => format!("{exe} --agent codex {event}"),
         }
     }
 
@@ -244,7 +251,7 @@ impl HookConfig {
         static WRITES: Mutex<()> = Mutex::new(());
         let _lock = WRITES.lock().map_err(|_| "Hook configuration writer is unavailable")?;
         let current = self.read()?;
-        let stale = || format!("{} changed since the preview. Nothing was written — review the new diff.", self.path.display());
+        let stale = || format!("{} changed since the preview. Nothing was written â€” review the new diff.", self.path.display());
         if self.fingerprint(&current, install) != fingerprint { return Err(stale()); }
         let next = self.changed(&current.value, install);
         if next == current.value { return Ok(String::new()); }
@@ -263,6 +270,14 @@ impl HookConfig {
         let write_result = (|| {
             file.write_all(format!("{}\n", pretty(&next)).as_bytes())
                 .and_then(|_| file.sync_all()).map_err(|err| format!("write failed: {err}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&self.path)
+                    .map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
+                file.set_permissions(std::fs::Permissions::from_mode(mode))
+                    .map_err(|err| format!("permissions failed: {err}"))?;
+            }
             drop(file);
             before_replace();
             // Catch edits made during backup / serialization as well as stale
@@ -276,7 +291,7 @@ impl HookConfig {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
     use std::ops::Deref;
@@ -496,7 +511,11 @@ fn unique_file(base: &Path) -> Result<(PathBuf, std::fs::File), String> {
             base.with_file_name(format!("{}.{}-{}", base.file_name().unwrap_or_default().to_string_lossy(),
                 std::process::id(), SEQUENCE.fetch_add(1, Ordering::Relaxed)))
         };
-        match OpenOptions::new().create_new(true).write(true).open(&path) {
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        match options.open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(format!("Can't create {}: {err}", path.display())),
@@ -507,7 +526,7 @@ fn unique_file(base: &Path) -> Result<(PathBuf, std::fs::File), String> {
 
 fn pretty(value: &Value) -> String { serde_json::to_string_pretty(value).expect("JSON settings") }
 
-/// settings.json is short, so a plain O(n·m) LCS is the simplest honest diff.
+/// settings.json is short, so a plain O(nÂ·m) LCS is the simplest honest diff.
 fn unified_diff(before: &str, after: &str) -> String {
     let a: Vec<&str> = before.lines().collect();
     let b: Vec<&str> = after.lines().collect();
@@ -574,9 +593,40 @@ fn unified_diff(before: &str, after: &str) -> String {
             result.push('\n');
             gap = false;
         } else if !gap {
-            result.push_str("  …\n");
+            result.push_str("  â€¦\n");
             gap = true;
         }
     }
     result
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn shell_paths_and_rewrites_preserve_linux_security() {
+        let dir = std::env::temp_dir().join(format!("coucou-config-port-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let config = HookConfig { agent: HookAgent::Claude,
+            path: dir.join("settings.json"), hook_path: PathBuf::from("/home/a b/it's$(id)/coucou-hook") };
+        assert_eq!(config.command("Stop"), "'/home/a b/it'\\''s$(id)/coucou-hook' Stop");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        for wanted in [0o600, 0o640, 0o644] {
+            std::fs::write(&config.path, br#"{"env":{"PRIVATE":"test-only"},"hooks":{"Custom":[{"hooks":[{"type":"command","command":"other"}]}]}}"#).unwrap();
+            std::fs::set_permissions(&config.path, std::fs::Permissions::from_mode(wanted)).unwrap();
+            let plan = config.preview(true, "test").unwrap();
+            let backup = config.write(true, &plan.fingerprint, "test").unwrap();
+            assert_eq!(mode(&config.path), wanted);
+            assert_eq!(mode(Path::new(&backup)), 0o600);
+            assert_eq!(config.read().unwrap().value["env"]["PRIVATE"], "test-only");
+            assert!(config.read().unwrap().value["hooks"]["Custom"].is_array());
+        }
+        std::fs::remove_file(&config.path).unwrap();
+        let plan = config.preview(true, "new").unwrap();
+        config.write(true, &plan.fingerprint, "new").unwrap();
+        assert_eq!(mode(&config.path), 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

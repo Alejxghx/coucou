@@ -16,14 +16,20 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
 const PREPARE_BUDGET: Duration = Duration::from_secs(2);
 const FIRE_AND_FORGET_BUDGET: Duration = Duration::from_secs(2);
 const DECISION_BUDGET: Duration = Duration::from_secs(110);
-const ERROR_PIPE_BUSY: i32 = 231;
 /// Must fit the server's frame limit, including the terminating newline.
 const MAX_PAYLOAD: usize = 1 << 20;
 const MAX_REPLY: usize = 64;
 const MAX_FIELD_LEN: usize = 2_000;
 const DROPPED_FIELDS: &[&str] = &["tool_response", "transcript_path"];
 
+#[cfg(windows)]
 mod win;
+#[cfg(windows)]
+use win::connect;
+#[cfg(target_os = "linux")]
+mod unix;
+#[cfg(target_os = "linux")]
+use unix::connect;
 #[cfg(test)]
 mod tests;
 
@@ -66,33 +72,6 @@ fn parse_args(args: &[String]) -> Option<Args> {
         _ => return None,
     };
     Some(Args { agent: agent_from_tag(tag), event: event.into(), agent_tag: tag.map(str::to_string) })
-}
-
-fn pipe_path() -> String {
-    let key = win::current_user_sid()
-        .unwrap_or_else(|| std::env::var("USERNAME").unwrap_or_else(|_| "user".into()));
-    format!(r"\\.\pipe\coucou-{key}")
-}
-
-/// Refuse other users' servers before sending any session data.
-fn connect() -> Option<std::fs::File> {
-    use std::os::windows::io::AsRawHandle;
-    let path = pipe_path();
-    let deadline = Instant::now() + CONNECT_TIMEOUT;
-    loop {
-        match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
-            Ok(file) => {
-                let handle = windows::Win32::Foundation::HANDLE(file.as_raw_handle());
-                return win::pipe_server_is_same_user(handle).then_some(file);
-            }
-            Err(err) => {
-                if err.raw_os_error() != Some(ERROR_PIPE_BUSY) || Instant::now() >= deadline {
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(15));
-            }
-        }
-    }
 }
 
 fn main() {
@@ -262,7 +241,7 @@ fn truncate_strings(value: &mut Value) {
     }
 }
 
-fn talk(mut pipe: std::fs::File, payload: &str, waits_for_answer: bool) -> Option<String> {
+fn talk(mut pipe: impl Read + Write, payload: &str, waits_for_answer: bool) -> Option<String> {
     pipe.write_all(payload.as_bytes()).ok()?;
     let _ = pipe.flush();
     if !waits_for_answer { return None; }
