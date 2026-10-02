@@ -1,5 +1,6 @@
 // Coucou for Windows — app wiring and the commands the island calls.
 
+mod chat;
 mod claude;
 mod files;
 mod hooks;
@@ -7,6 +8,7 @@ mod hooks_config;
 mod integrations;
 mod island;
 mod log;
+mod openai;
 mod pipe;
 mod platform;
 mod secrets;
@@ -21,7 +23,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 
-use claude::{Chat, ChatContext, ChatReply};
+use chat::{Chat, Provider};
+use claude::{ChatContext, ChatReply};
 use files::DroppedFile;
 use hooks::{HookAgent, HookPreview, HookStatus};
 use island::{PollGate, ScreenInfo};
@@ -61,11 +64,14 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
 }
 
 #[tauri::command]
-fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
+fn save_settings(app: AppHandle, shared: State<Shared>, chat: State<Chat>, settings: Settings) {
     let (screen_changed, autostart_changed) = {
         let mut current = shared.settings.lock().unwrap();
         let screen_changed = current.screen != settings.screen;
         let autostart_changed = current.autostart != settings.autostart;
+        if current.chat_provider != settings.chat_provider || current.chat_model() != settings.chat_model() {
+            chat.reset();
+        }
         *current = settings.clone();
         (screen_changed, autostart_changed)
     };
@@ -248,8 +254,12 @@ async fn chat_send(
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
-    let model = shared.settings.lock().unwrap().model.clone();
-    claude::send(&chat, &model, query, context).await
+    let _turn = chat.turn.try_lock().map_err(|_| "A chat request is already running. Please wait.")?;
+    let settings = shared.settings.lock().unwrap().clone();
+    match settings.chat_provider {
+        Provider::Claude => claude::send(&chat, settings.chat_model(), query, context).await,
+        Provider::Openai => openai::send(&chat, settings.chat_model(), query, context).await,
+    }
 }
 
 #[tauri::command]

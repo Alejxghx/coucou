@@ -104,6 +104,8 @@ export interface Settings {
   hooksInstalled: boolean;
   /** Claude model used by the chat. */
   model: string;
+  chatProvider: "claude" | "openai";
+  openaiModel: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -118,6 +120,8 @@ export const DEFAULT_SETTINGS: Settings = {
   autostart: false,
   hooksInstalled: false,
   model: "claude-opus-5",
+  chatProvider: "claude",
+  openaiModel: "gpt-4.1-mini",
 };
 
 type Listener = () => void;
@@ -148,6 +152,7 @@ class AppState {
   noteMessage: string | null = null;
   searchResult: SearchResult | null = null;
   chatHistory: ChatMessage[] = [];
+  chatGeneration = 0;
   pendingApproval: ApprovalInfo | null = null;
 
   integrations: Record<string, IntegrationInfo> = {};

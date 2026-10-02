@@ -86,7 +86,7 @@ function hooksSection(agent: HookAgent, status: HookStatus): HTMLElement {
     if (agent === "codex") {
       body.append(h("div", {
         class: "hint",
-        text: "Requires a Codex version with hooks support enabled. Review and trust Coucou's hooks in Codex with /hooks; installation alone does not enable trust. Activity sends local session metadata and tool names only. Permission requests include their exact arguments so you can review them. The built-in chat still uses Claude.",
+        text: "Requires a Codex version with hooks support enabled. Review and trust Coucou's hooks in Codex with /hooks; installation alone does not enable trust. Activity sends local session metadata and tool names only. Permission requests include their exact arguments so you can review them. The built-in chat uses the API provider selected below.",
       }));
     }
     if (status.error) body.append(h("div", { class: "notice err", text: status.error }));
@@ -181,7 +181,7 @@ function hooksSection(agent: HookAgent, status: HookStatus): HTMLElement {
   return section;
 }
 
-// ── Claude API section ────────────────────────────────────────────────────────
+// ── Chat API sections ────────────────────────────────────────────────────────
 
 const MODELS: [string, string][] = [
   ["claude-opus-5", "Claude Opus 5"],
@@ -189,13 +189,29 @@ const MODELS: [string, string][] = [
   ["claude-haiku-4-5", "Claude Haiku 4.5"],
 ];
 
-function apiSection(hasKey: boolean): HTMLElement {
+function chatProviderSection(): HTMLElement {
+  const provider = h("select", { "aria-label": "Chat provider" }) as HTMLSelectElement;
+  provider.append(h("option", { value: "claude", text: "Claude (Anthropic)" }), h("option", { value: "openai", text: "OpenAI" }));
+  provider.value = settings.chatProvider;
+  provider.addEventListener("change", () => {
+    settings.chatProvider = provider.value as Settings["chatProvider"];
+    void save();
+  });
+  return h("section", {}, h("h2", { text: "Chat" }),
+    h("div", { class: "row" }, h("label", { text: "Provider" }), provider),
+    h("div", { class: "hint", text: "Changing the provider or active model starts a new conversation and clears the attached file. Messages and attachments go only to the selected provider." }));
+}
+
+function apiSection(provider: Settings["chatProvider"], hasKey: boolean): HTMLElement {
+  const isOpenAI = provider === "openai";
+  const key = isOpenAI ? "openai-api-key" : "anthropic-api-key";
+  const keyPlaceholder = isOpenAI ? "sk-..." : "sk-ant-...";
   const dot = statusDot(hasKey);
-  const state = h("span", { class: "hint", text: hasKey ? "Key saved in the Windows Credential Manager." : "No key yet — the chat needs one." });
+  const state = h("span", { class: "hint", text: hasKey ? "Key saved in the system credential store." : "No key yet — the chat needs one." });
 
   const field = h("input", {
     type: "password",
-    placeholder: hasKey ? "••••••••••••  (stored)" : "sk-ant-...",
+    placeholder: hasKey ? "••••••••••••  (stored)" : keyPlaceholder,
     style: "flex:1 1 auto;min-width:0",
     autocomplete: "off",
     spellcheck: "false",
@@ -206,12 +222,12 @@ function apiSection(hasKey: boolean): HTMLElement {
   const feedback = h("div", {});
 
   async function refresh() {
-    const present = (await Bridge.secretPresent("anthropic-api-key")) ?? false;
+    const present = (await Bridge.secretPresent(key)) ?? false;
     dot.style.background = present ? "#22c55e" : "#f4505e";
     state.textContent = present
-      ? "Key saved in the Windows Credential Manager."
+      ? "Key saved in the system credential store."
       : "No key yet — the chat needs one.";
-    field.placeholder = present ? "••••••••••••  (stored)" : "sk-ant-...";
+    field.placeholder = present ? "••••••••••••  (stored)" : keyPlaceholder;
     clearBtn.style.display = present ? "" : "none";
   }
 
@@ -220,9 +236,9 @@ function apiSection(hasKey: boolean): HTMLElement {
     if (!value) return;
     clear(feedback);
     try {
-      await Bridge.secretSet("anthropic-api-key", value);
+      await Bridge.secretSet(key, value);
       field.value = "";
-      feedback.append(h("div", { class: "notice ok", text: "Saved. It never touches disk." }));
+      feedback.append(h("div", { class: "notice ok", text: "Saved securely in the system credential store." }));
       await refresh();
     } catch (err) {
       feedback.append(h("div", { class: "notice err", text: `Could not save: ${String(err)}` }));
@@ -232,7 +248,7 @@ function apiSection(hasKey: boolean): HTMLElement {
   clearBtn.addEventListener("click", async () => {
     clear(feedback);
     try {
-      await Bridge.secretClear("anthropic-api-key");
+      await Bridge.secretClear(key);
       feedback.append(h("div", { class: "notice ok", text: "Key removed." }));
       await refresh();
     } catch (err) {
@@ -240,26 +256,36 @@ function apiSection(hasKey: boolean): HTMLElement {
     }
   });
 
-  const model = h("select", {}) as HTMLSelectElement;
-  for (const [id, label] of MODELS) model.append(h("option", { value: id, text: label }));
-  if (!MODELS.some(([id]) => id === settings.model)) {
-    model.append(h("option", { value: settings.model, text: settings.model }));
+  let model: HTMLInputElement | HTMLSelectElement;
+  if (isOpenAI) {
+    model = h("input", { type: "text", value: settings.openaiModel, placeholder: "gpt-4.1-mini", "aria-label": "OpenAI model", spellcheck: "false" }) as HTMLInputElement;
+    model.addEventListener("change", () => {
+      const value = model.value.trim();
+      if (!value) { model.value = settings.openaiModel; return; }
+      settings.openaiModel = value;
+      void save();
+    });
+  } else {
+    model = h("select", { "aria-label": "Claude model" }) as HTMLSelectElement;
+    for (const [id, label] of MODELS) model.append(h("option", { value: id, text: label }));
+    if (!MODELS.some(([id]) => id === settings.model)) {
+      model.append(h("option", { value: settings.model, text: settings.model }));
+    }
+    model.value = settings.model;
+    model.addEventListener("change", () => { settings.model = model.value; void save(); });
   }
-  model.value = settings.model;
-  model.addEventListener("change", () => {
-    settings.model = model.value;
-    void save();
-  });
-
   clearBtn.style.display = hasKey ? "" : "none";
 
   return h(
     "section",
     {},
-    h("h2", {}, dot, h("span", { text: "Claude" })),
+    h("h2", {}, dot, h("span", { text: isOpenAI ? "OpenAI" : "Claude" })),
     state,
     h("div", { class: "row" }, h("label", { text: "API key" }), field, saveBtn, clearBtn),
     h("div", { class: "row" }, h("label", { text: "Model" }), model),
+    h("div", { class: "hint", text: isOpenAI
+      ? "Use an OpenAI API key and a Responses-compatible model available to your account. Supports text, images and PDFs; live web search is not enabled. API usage has its own billing."
+      : "Uses the Anthropic API, including web search." }),
     feedback,
   );
 }
@@ -443,6 +469,7 @@ async function main() {
   };
 
   const hasKey = (await Bridge.secretPresent("anthropic-api-key")) ?? false;
+  const hasOpenAIKey = (await Bridge.secretPresent("openai-api-key")) ?? false;
 
   const keys = [
     "stripe-api-key", "github-token", "vercel-token",
@@ -456,7 +483,9 @@ async function main() {
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
     hooksSection("claude", status),
     hooksSection("codex", codexStatus),
-    apiSection(hasKey),
+    chatProviderSection(),
+    apiSection("claude", hasKey),
+    apiSection("openai", hasOpenAIKey),
     integrationsSection(present),
     generalSection(),
     h("div", {

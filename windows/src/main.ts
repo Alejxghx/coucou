@@ -56,6 +56,16 @@ async function main() {
 
   // The settings window writes preferences; apply them here without a restart.
   await onEvent<Settings>("settings-changed", (s) => {
+    const previous = State.settings;
+    const model = (v: Settings) => v.chatProvider === "openai" ? v.openaiModel : v.model;
+    if (s.chatProvider !== previous.chatProvider || model(s) !== model(previous)) {
+      State.chatGeneration++;
+      State.chatHistory = [];
+      State.droppedFile = null;
+      State.promptContext = null;
+      State.stateOverride = null;
+      State.notify();
+    }
     State.settings = { ...State.settings, ...s };
     island.applySettings();
     State.loadIntegrationTasks();
